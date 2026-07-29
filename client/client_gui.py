@@ -39,18 +39,22 @@ class RateMonitor:
         ensure_log_dir()
         
         self.root = root
-        self.root.title("Монитор курса валют + анализ RTT")
+        self.root.title("Монитор криптовалют + анализ RTT")
         self.root.geometry("800x720")
         self.root.resizable(True, True)
         
         # Переменные для данных
-        self.current_rate = 0
+        self.current_price = 0
         self.current_rtt = 0
         self.current_size = 0
         self.current_req_id = 0
+        self.current_change_24h = 0
+        self.current_change_1h = 0
+        self.current_symbol = "BTC"
+        self.current_asset = "Bitcoin"
         self.is_running = True
+        self.price_history = []
         self.rtt_history = []
-        self.rate_history = []
         self.time_history = []
         
         # Флаг для теста
@@ -130,15 +134,20 @@ class RateMonitor:
         main_frame = tk.Frame(self.root, padx=20, pady=20)
         main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Курс
-        rate_frame = tk.Frame(main_frame, bg='#f8f9fa', relief=tk.RIDGE, bd=2)
-        rate_frame.pack(fill=tk.X, pady=(0, 20))
+        # Цена
+        price_frame = tk.Frame(main_frame, bg='#f8f9fa', relief=tk.RIDGE, bd=2)
+        price_frame.pack(fill=tk.X, pady=(0, 20))
         
-        tk.Label(rate_frame, text="USD / RUB", font=('Arial', 14), bg='#f8f9fa').pack(pady=(10, 0))
+        self.symbol_label = tk.Label(price_frame, text="BTC / USD", font=('Arial', 14), bg='#f8f9fa')
+        self.symbol_label.pack(pady=(10, 0))
         
-        self.rate_label = tk.Label(rate_frame, text="--", font=('Arial', 48, 'bold'), 
-                                   fg='#2d3748', bg='#f8f9fa')
-        self.rate_label.pack(pady=(5, 10))
+        self.price_label = tk.Label(price_frame, text="--", font=('Arial', 48, 'bold'), 
+                                    fg='#2d3748', bg='#f8f9fa')
+        self.price_label.pack(pady=(5, 10))
+        
+        # Изменение за 24ч
+        self.change_label = tk.Label(price_frame, text="", font=('Arial', 14), bg='#f8f9fa')
+        self.change_label.pack(pady=(0, 10))
         
         # Метрики
         metrics_frame = tk.Frame(main_frame)
@@ -206,7 +215,6 @@ class RateMonitor:
         self.ax2.text(0.5, 0.5, "Ожидание подключения...", 
                      horizontalalignment='center', verticalalignment='center', 
                      transform=self.ax2.transAxes, fontsize=14, color='gray')
-        # Используем draw вместо tight_layout, чтобы избежать ошибок
         self.canvas.draw()
     
     def show_reset_placeholder(self):
@@ -311,8 +319,8 @@ class RateMonitor:
     def _reset_counter_success(self):
         """Сброс счетчика на сервере и очистка графиков"""
         # Очищаем историю данных
+        self.price_history.clear()
         self.rtt_history.clear()
-        self.rate_history.clear()
         self.time_history.clear()
         
         # Сбрасываем отображение ID и счетчика
@@ -359,18 +367,22 @@ class RateMonitor:
             rtt_ms = (end_time - start_time) * 1000
             data = response.json()
             
-            self.current_rate = data['rate']
+            self.current_price = data['price_usd']
             self.current_rtt = rtt_ms
             self.current_size = int(response.headers.get('X-Response-Size', 0))
             self.current_req_id = data['request_id']
+            self.current_change_24h = data['change_24h']
+            self.current_change_1h = data['change_1h']
+            self.current_symbol = data.get('symbol', 'BTC')
+            self.current_asset = data.get('asset', 'Bitcoin')
             
+            self.price_history.append(data['price_usd'])
             self.rtt_history.append(rtt_ms)
-            self.rate_history.append(data['rate'])
-            self.time_history.append(len(self.rtt_history))
+            self.time_history.append(len(self.price_history))
             
-            if len(self.rtt_history) > 50:
+            if len(self.price_history) > 50:
+                self.price_history.pop(0)
                 self.rtt_history.pop(0)
-                self.rate_history.pop(0)
                 self.time_history.pop(0)
             
             self.root.after(0, self.update_ui, True, data['timestamp'])
@@ -383,8 +395,20 @@ class RateMonitor:
     
     def update_ui(self, success, timestamp):
         if success:
-            self.rate_label.config(text=f"{self.current_rate:.2f}")
+            # Обновляем символ и цену
+            self.symbol_label.config(text=f"{self.current_asset} / USD")
+            self.price_label.config(text=f"${self.current_price:,.2f}")
             
+            # Обновляем изменение за 24ч
+            change_text = f"24ч: {self.current_change_24h:+.2f}%"
+            if self.current_change_24h > 0:
+                self.change_label.config(text=change_text, fg='#2e7d32')
+            elif self.current_change_24h < 0:
+                self.change_label.config(text=change_text, fg='#c62828')
+            else:
+                self.change_label.config(text=change_text, fg='#666666')
+            
+            # Обновляем RTT
             rtt_text = f"{self.current_rtt:.1f} мс"
             if self.current_rtt < 10:
                 self.rtt_label.config(text=rtt_text, fg='#2e7d32')
@@ -407,7 +431,7 @@ class RateMonitor:
         else:
             self.status_dot.config(fg='red', bg='#f0f0f0')
             self.status_label.config(text="Ошибка", fg='red')
-            self.rate_label.config(text="ОШИБКА")
+            self.price_label.config(text="ОШИБКА")
     
     def manual_update(self):
         if not self.server_url:
@@ -442,7 +466,7 @@ class RateMonitor:
         self.plot_updating = True
         
         try:
-            if len(self.rtt_history) < 2:
+            if len(self.price_history) < 2:
                 # Если данных мало, показываем заглушку
                 self.show_placeholder()
                 self.plot_updating = False
@@ -456,20 +480,23 @@ class RateMonitor:
             self.ax1.clear()
             self.ax2.clear()
             
-            # График 1: RTT (без подписи оси X)
-            self.ax1.plot(self.time_history, self.rtt_history, 'b-o', markersize=3, linewidth=1.5)
-            self.ax1.axhline(y=np.mean(self.rtt_history), color='r', linestyle='--', 
-                            label=f'Среднее: {np.mean(self.rtt_history):.1f} мс')
-            self.ax1.set_title('Динамика задержки (RTT)', fontsize=10)
-            self.ax1.set_ylabel('Задержка (мс)')
+            # График 1: Цена (без подписи оси X)
+            self.ax1.plot(self.time_history, self.price_history, 'b-o', markersize=3, linewidth=1.5)
+            self.ax1.axhline(y=np.mean(self.price_history), color='r', linestyle='--', 
+                            label=f'Средняя: ${np.mean(self.price_history):,.2f}')
+            self.ax1.set_title('Динамика цены', fontsize=10)
+            self.ax1.set_ylabel('Цена (USD)')
             self.ax1.grid(True, alpha=0.3)
             self.ax1.legend(fontsize=8)
             
-            # График 2: Курс валют (без подписи оси X)
-            self.ax2.plot(self.time_history, self.rate_history, 'g-o', markersize=3, linewidth=1.5)
-            self.ax2.set_title('Курс USD/RUB', fontsize=10)
-            self.ax2.set_ylabel('Курс')
+            # График 2: RTT (без подписи оси X)
+            self.ax2.plot(self.time_history, self.rtt_history, 'g-o', markersize=3, linewidth=1.5)
+            self.ax2.axhline(y=np.mean(self.rtt_history), color='r', linestyle='--', 
+                            label=f'Среднее: {np.mean(self.rtt_history):.1f} мс')
+            self.ax2.set_title('Динамика задержки (RTT)', fontsize=10)
+            self.ax2.set_ylabel('Задержка (мс)')
             self.ax2.grid(True, alpha=0.3)
+            self.ax2.legend(fontsize=8)
             
             # Используем try/except для tight_layout
             try:
@@ -512,13 +539,13 @@ class RateMonitor:
     def _run_test_thread(self):
         rtt_values = []
         timestamps = []
-        rate_values = []
+        price_values = []
         errors = 0
         
         log_file = get_log_path('rtt_test')
         
         with open(log_file, 'w', encoding='utf-8') as f:
-            f.write('timestamp,rtt_ms,rate,request_id\n')
+            f.write('timestamp,rtt_ms,price_usd,request_id\n')
         
         for i in range(100):
             start_time = time.perf_counter()
@@ -532,18 +559,18 @@ class RateMonitor:
                 
                 rtt_values.append(rtt_ms)
                 timestamps.append(i)
-                rate_values.append(data['rate'])
+                price_values.append(data['price_usd'])
                 
                 with open(log_file, 'a', encoding='utf-8') as f:
-                    f.write(f"{datetime.now().isoformat()},{rtt_ms:.2f},{data['rate']:.2f},{data['request_id']}\n")
+                    f.write(f"{datetime.now().isoformat()},{rtt_ms:.2f},{data['price_usd']:.2f},{data['request_id']}\n")
                 
-                print(f"[OK] #{i+1:3d} | RTT: {rtt_ms:.2f} мс | Курс: {data['rate']:.2f}")
+                print(f"[OK] #{i+1:3d} | RTT: {rtt_ms:.2f} мс | Цена: ${data['price_usd']:,.2f}")
                 
             except Exception as e:
                 errors += 1
                 rtt_values.append(None)
                 timestamps.append(i)
-                rate_values.append(None)
+                price_values.append(None)
                 print(f"[ERR] #{i+1:3d} | Ошибка: {e}")
             
             time.sleep(1)
@@ -551,6 +578,7 @@ class RateMonitor:
         self.test_results = {
             'rtt_values': rtt_values,
             'timestamps': timestamps,
+            'price_values': price_values,
             'log_file': log_file,
             'errors': errors
         }
@@ -563,10 +591,11 @@ class RateMonitor:
         
         rtt_values = self.test_results['rtt_values']
         timestamps = self.test_results['timestamps']
+        price_values = self.test_results['price_values']
         log_file = self.test_results['log_file']
         errors = self.test_results['errors']
         
-        self._plot_test_results(rtt_values, timestamps, log_file, errors)
+        self._plot_test_results(rtt_values, timestamps, price_values, log_file, errors)
         
         success_count = 100 - errors
         messagebox.showinfo(
@@ -577,16 +606,18 @@ class RateMonitor:
             f"График сохранен в: {log_file.replace('.csv', '.png')}"
         )
     
-    def _plot_test_results(self, rtt_values, timestamps, log_file, errors):
+    def _plot_test_results(self, rtt_values, timestamps, price_values, log_file, errors):
         valid_rtt = [v for v in rtt_values if v is not None]
-        valid_times = [timestamps[i] for i in range(len(timestamps)) if rtt_values[i] is not None]
+        valid_prices = [v for v in price_values if v is not None]
+        valid_times = [timestamps[i] for i in range(len(timestamps)) 
+                      if rtt_values[i] is not None and price_values[i] is not None]
         
         if len(valid_rtt) == 0:
             return
         
         fig, axes = plt.subplots(2, 1, figsize=(12, 8))
         
-        # График RTT (без подписи оси X)
+        # График 1: RTT (без подписи оси X)
         axes[0].plot(valid_times, valid_rtt, 'b-o', markersize=4, linewidth=1.5)
         axes[0].axhline(y=np.mean(valid_rtt), color='r', linestyle='--', 
                        label=f'Среднее: {np.mean(valid_rtt):.2f} мс')
@@ -595,7 +626,7 @@ class RateMonitor:
         axes[0].grid(True, alpha=0.3)
         axes[0].legend()
         
-        # Гистограмма (без подписи оси X)
+        # График 2: Гистограмма RTT (без подписи оси X)
         axes[1].hist(valid_rtt, bins=20, color='skyblue', edgecolor='black', alpha=0.7)
         axes[1].axvline(x=np.mean(valid_rtt), color='r', linestyle='--', 
                        label=f'Среднее: {np.mean(valid_rtt):.2f} мс')
