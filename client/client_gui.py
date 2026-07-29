@@ -40,7 +40,7 @@ class RateMonitor:
         
         self.root = root
         self.root.title("Монитор курса валют + анализ RTT")
-        self.root.geometry("800x700")
+        self.root.geometry("800x720")
         self.root.resizable(True, True)
         
         # Переменные для данных
@@ -58,6 +58,9 @@ class RateMonitor:
         
         # URL сервера
         self.server_url = None
+        
+        # Флаг для предотвращения одновременного обновления графика
+        self.plot_updating = False
         
         # Создаем интерфейс
         self.create_widgets()
@@ -108,13 +111,20 @@ class RateMonitor:
                                     command=self.manual_update,
                                     font=('Arial', 10), bg='#4CAF50', fg='white', padx=15)
         self.btn_update.pack(side=tk.LEFT)
-        self.btn_update.config(state=tk.DISABLED)  # Пока нет подключения
+        self.btn_update.config(state=tk.DISABLED)
         
         self.btn_stats = tk.Button(control_frame, text="Запустить тест (100 запросов)", 
                                    command=self.run_full_test, font=('Arial', 10), 
                                    bg='#2196F3', fg='white', padx=15)
         self.btn_stats.pack(side=tk.LEFT, padx=10)
-        self.btn_stats.config(state=tk.DISABLED)  # Пока нет подключения
+        self.btn_stats.config(state=tk.DISABLED)
+        
+        # Кнопка сброса счетчика (светло-желтый фон)
+        self.btn_reset = tk.Button(control_frame, text="Сбросить счетчик запросов", 
+                                   command=self.reset_counter,
+                                   font=('Arial', 10), bg='#FFF9C4', fg='#333333', padx=15)
+        self.btn_reset.pack(side=tk.LEFT)
+        self.btn_reset.config(state=tk.DISABLED)
         
         # ===== ОСНОВНОЙ БЛОК =====
         main_frame = tk.Frame(self.root, padx=20, pady=20)
@@ -169,15 +179,7 @@ class RateMonitor:
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         
         # Начальное состояние графиков
-        self.ax1.clear()
-        self.ax2.clear()
-        self.ax1.text(0.5, 0.5, "Ожидание подключения...", 
-                     horizontalalignment='center', verticalalignment='center', 
-                     transform=self.ax1.transAxes, fontsize=14, color='gray')
-        self.ax2.text(0.5, 0.5, "Ожидание подключения...", 
-                     horizontalalignment='center', verticalalignment='center', 
-                     transform=self.ax2.transAxes, fontsize=14, color='gray')
-        self.canvas.draw()
+        self.show_placeholder()
         
         # Статус-бар
         status_bar = tk.Frame(self.root, bg='#e0e0e0', padx=10, pady=5)
@@ -190,6 +192,34 @@ class RateMonitor:
         self.counter_label = tk.Label(status_bar, text="Запросов: 0", 
                                       font=('Arial', 9), bg='#e0e0e0')
         self.counter_label.pack(side=tk.RIGHT)
+    
+    # ===================================================================
+    # ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ДЛЯ ГРАФИКОВ
+    # ===================================================================
+    def show_placeholder(self):
+        """Показывает заглушку на графиках"""
+        self.ax1.clear()
+        self.ax2.clear()
+        self.ax1.text(0.5, 0.5, "Ожидание подключения...", 
+                     horizontalalignment='center', verticalalignment='center', 
+                     transform=self.ax1.transAxes, fontsize=14, color='gray')
+        self.ax2.text(0.5, 0.5, "Ожидание подключения...", 
+                     horizontalalignment='center', verticalalignment='center', 
+                     transform=self.ax2.transAxes, fontsize=14, color='gray')
+        # Используем draw вместо tight_layout, чтобы избежать ошибок
+        self.canvas.draw()
+    
+    def show_reset_placeholder(self):
+        """Показывает заглушку после сброса"""
+        self.ax1.clear()
+        self.ax2.clear()
+        self.ax1.text(0.5, 0.5, "Счетчик сброшен. Ожидание данных...",
+                     horizontalalignment='center', verticalalignment='center',
+                     transform=self.ax1.transAxes, fontsize=14, color='gray')
+        self.ax2.text(0.5, 0.5, "Счетчик сброшен. Ожидание данных...",
+                     horizontalalignment='center', verticalalignment='center',
+                     transform=self.ax2.transAxes, fontsize=14, color='gray')
+        self.canvas.draw()
     
     # ===================================================================
     # ПОДКЛЮЧЕНИЕ К СЕРВЕРУ
@@ -222,6 +252,7 @@ class RateMonitor:
         
         self.btn_stats.config(state=tk.NORMAL)
         self.btn_update.config(state=tk.NORMAL)
+        self.btn_reset.config(state=tk.NORMAL)
         
         self.start_monitoring()
         print(f"Подключено к серверу: {self.server_url}")
@@ -231,6 +262,7 @@ class RateMonitor:
         self.status_label.config(text="Ошибка подключения", fg='red')
         self.btn_connect.config(state=tk.NORMAL, text="Подключиться")
         self.btn_stats.config(state=tk.DISABLED)
+        self.btn_reset.config(state=tk.DISABLED)
         
         messagebox.showerror("Ошибка подключения", 
                             f"Не удалось подключиться к серверу {self.ip_entry.get()}:{self.port_entry.get()}\n"
@@ -249,6 +281,56 @@ class RateMonitor:
             return
         
         self.connect_to_server(ip, port)
+    
+    # ===================================================================
+    # СБРОС СЧЕТЧИКА + ОЧИСТКА ГРАФИКОВ
+    # ===================================================================
+    def reset_counter(self):
+        if not self.server_url:
+            messagebox.showwarning("Нет подключения", "Сначала подключитесь к серверу")
+            return
+        
+        if not messagebox.askyesno("Подтверждение", "Сбросить счетчик запросов и очистить графики?"):
+            return
+        
+        self.btn_reset.config(state=tk.DISABLED, text="Сброс...")
+        threading.Thread(target=self._reset_counter_thread, daemon=True).start()
+    
+    def _reset_counter_thread(self):
+        try:
+            reset_url = self.server_url.replace('/api/rate', '/api/reset')
+            response = requests.post(reset_url, timeout=3)
+            if response.status_code == 200:
+                self.root.after(0, self._reset_counter_success)
+            else:
+                self.root.after(0, self._reset_counter_failed)
+        except Exception as e:
+            print(f"Ошибка сброса: {e}")
+            self.root.after(0, self._reset_counter_failed)
+    
+    def _reset_counter_success(self):
+        """Сброс счетчика на сервере и очистка графиков"""
+        # Очищаем историю данных
+        self.rtt_history.clear()
+        self.rate_history.clear()
+        self.time_history.clear()
+        
+        # Сбрасываем отображение ID и счетчика
+        self.id_label.config(text="#0")
+        self.counter_label.config(text="Запросов: 0")
+        
+        # Очищаем графики и показываем сообщение
+        self.show_reset_placeholder()
+        
+        self.btn_reset.config(state=tk.NORMAL, text="Сбросить счетчик запросов")
+        messagebox.showinfo("Сброс выполнен", "Счетчик сброшен, графики очищены.\nСледующий запрос получит ID = 1.")
+        
+        # Принудительно обновляем данные (чтобы получить новый ID = 1)
+        self.fetch_data()
+    
+    def _reset_counter_failed(self):
+        self.btn_reset.config(state=tk.NORMAL, text="Сбросить счетчик запросов")
+        messagebox.showerror("Ошибка", "Не удалось сбросить счетчик на сервере")
     
     # ===================================================================
     # МОНИТОРИНГ
@@ -346,36 +428,72 @@ class RateMonitor:
     
     def plot_update_loop(self):
         while self.is_running:
-            self.update_plot()
+            try:
+                self.update_plot()
+            except Exception as e:
+                # Подавляем ошибки matplotlib, чтобы не крашить поток
+                print(f"Ошибка обновления графика: {e}")
             time.sleep(3)
     
     def update_plot(self):
-        if len(self.rtt_history) < 2:
+        # Защита от одновременного обновления
+        if self.plot_updating:
             return
+        self.plot_updating = True
         
-        self.ax1.clear()
-        self.ax2.clear()
+        try:
+            if len(self.rtt_history) < 2:
+                # Если данных мало, показываем заглушку
+                self.show_placeholder()
+                self.plot_updating = False
+                return
+            
+            # Проверяем, что оси существуют
+            if self.ax1 is None or self.ax2 is None:
+                self.plot_updating = False
+                return
+            
+            self.ax1.clear()
+            self.ax2.clear()
+            
+            # График 1: RTT (без подписи оси X)
+            self.ax1.plot(self.time_history, self.rtt_history, 'b-o', markersize=3, linewidth=1.5)
+            self.ax1.axhline(y=np.mean(self.rtt_history), color='r', linestyle='--', 
+                            label=f'Среднее: {np.mean(self.rtt_history):.1f} мс')
+            self.ax1.set_title('Динамика задержки (RTT)', fontsize=10)
+            self.ax1.set_ylabel('Задержка (мс)')
+            self.ax1.grid(True, alpha=0.3)
+            self.ax1.legend(fontsize=8)
+            
+            # График 2: Курс валют (без подписи оси X)
+            self.ax2.plot(self.time_history, self.rate_history, 'g-o', markersize=3, linewidth=1.5)
+            self.ax2.set_title('Курс USD/RUB', fontsize=10)
+            self.ax2.set_ylabel('Курс')
+            self.ax2.grid(True, alpha=0.3)
+            
+            # Используем try/except для tight_layout
+            try:
+                self.fig.tight_layout()
+            except Exception as e:
+                # Если tight_layout не работает, просто рисуем без него
+                print(f"tight_layout warning: {e}")
+                pass
+            
+            self.canvas.draw()
+            
+        except Exception as e:
+            print(f"Ошибка в update_plot: {e}")
+            # Восстанавливаем оси при ошибке
+            try:
+                self.show_placeholder()
+            except:
+                pass
         
-        self.ax1.plot(self.time_history, self.rtt_history, 'b-o', markersize=3, linewidth=1.5)
-        self.ax1.axhline(y=np.mean(self.rtt_history), color='r', linestyle='--', 
-                        label=f'Среднее: {np.mean(self.rtt_history):.1f} мс')
-        self.ax1.set_title('Динамика задержки (RTT)', fontsize=10)
-        self.ax1.set_xlabel('Номер запроса')
-        self.ax1.set_ylabel('Задержка (мс)')
-        self.ax1.grid(True, alpha=0.3)
-        self.ax1.legend(fontsize=8)
-        
-        self.ax2.plot(self.time_history, self.rate_history, 'g-o', markersize=3, linewidth=1.5)
-        self.ax2.set_title('Курс USD/RUB', fontsize=10)
-        self.ax2.set_xlabel('Номер запроса')
-        self.ax2.set_ylabel('Курс')
-        self.ax2.grid(True, alpha=0.3)
-        
-        self.fig.tight_layout()
-        self.canvas.draw()
+        finally:
+            self.plot_updating = False
     
     # ===================================================================
-    # ТЕСТ (РАБОТАЕТ МНОГОКРАТНО)
+    # ТЕСТ НА 100 ЗАПРОСОВ
     # ===================================================================
     def run_full_test(self):
         if not self.server_url:
@@ -440,9 +558,8 @@ class RateMonitor:
         self.root.after(0, self._test_finished)
     
     def _test_finished(self):
-        # ВОССТАНАВЛИВАЕМ КНОПКУ (теперь можно запускать снова)
         self.btn_stats.config(state=tk.NORMAL, text="Запустить тест (100 запросов)")
-        self.test_running = False  # Сбрасываем флаг
+        self.test_running = False
         
         rtt_values = self.test_results['rtt_values']
         timestamps = self.test_results['timestamps']
@@ -469,25 +586,23 @@ class RateMonitor:
         
         fig, axes = plt.subplots(2, 1, figsize=(12, 8))
         
+        # График RTT (без подписи оси X)
         axes[0].plot(valid_times, valid_rtt, 'b-o', markersize=4, linewidth=1.5)
         axes[0].axhline(y=np.mean(valid_rtt), color='r', linestyle='--', 
                        label=f'Среднее: {np.mean(valid_rtt):.2f} мс')
         axes[0].set_title('Задержка (RTT) при 100 запросах', fontsize=14)
-        axes[0].set_xlabel('Номер запроса')
         axes[0].set_ylabel('Задержка (мс)')
         axes[0].grid(True, alpha=0.3)
         axes[0].legend()
         
+        # Гистограмма (без подписи оси X)
         axes[1].hist(valid_rtt, bins=20, color='skyblue', edgecolor='black', alpha=0.7)
         axes[1].axvline(x=np.mean(valid_rtt), color='r', linestyle='--', 
                        label=f'Среднее: {np.mean(valid_rtt):.2f} мс')
         axes[1].set_title('Распределение задержек', fontsize=14)
-        axes[1].set_xlabel('Задержка (мс)')
         axes[1].set_ylabel('Частота')
         axes[1].grid(True, alpha=0.3)
         axes[1].legend()
-        
-        plt.figtext(0.02, 0.02, f'Ошибок: {errors} из 100', fontsize=10, color='red')
         
         plt.tight_layout()
         
