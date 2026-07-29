@@ -11,6 +11,9 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
 import os
 import warnings
+import socket
+import ipaddress
+from concurrent.futures import ThreadPoolExecutor, as_completed
 warnings.filterwarnings('ignore')
 
 # ===================================================================
@@ -32,6 +35,88 @@ def get_log_path(prefix='rtt_test'):
     return os.path.join('logs', f'{prefix}_{timestamp}.csv')
 
 # ===================================================================
+# ФУНКЦИИ ДЛЯ ПОИСКА СЕРВЕРА
+# ===================================================================
+def get_local_ip():
+    """Получение локального IP-адреса компьютера"""
+    try:
+        # Подключаемся к внешнему адресу, чтобы узнать свой IP в сети
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return "127.0.0.1"
+
+def get_network_range(ip):
+    """Вычисление диапазона IP-адресов в локальной сети"""
+    try:
+        # Определяем маску подсети /24 (255.255.255.0)
+        parts = ip.split('.')
+        if len(parts) == 4:
+            network_prefix = '.'.join(parts[:3])
+            return [f"{network_prefix}.{i}" for i in range(1, 255)]
+    except:
+        return []
+    return []
+
+def check_server(ip, port=5000, timeout=1):
+    """Проверка, является ли IP-адрес сервером с нашим API"""
+    try:
+        url = f"http://{ip}:{port}/api/rate"
+        response = requests.get(url, timeout=timeout)
+        if response.status_code == 200:
+            data = response.json()
+            # Проверяем, что ответ содержит нужные поля
+            if 'price_usd' in data or 'request_id' in data:
+                return ip
+    except:
+        pass
+    return None
+
+def find_server_async(port=5000, timeout=1, max_workers=50):
+    """
+    Асинхронный поиск сервера в локальной сети.
+    Возвращает IP-адрес или None.
+    """
+    local_ip = get_local_ip()
+    if local_ip == "127.0.0.1":
+        return None
+    
+    ip_list = get_network_range(local_ip)
+    if not ip_list:
+        return None
+    
+    print(f"[SCAN] Сканирование сети {local_ip}/24...")
+    
+    found_server = None
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Создаем словарь {будущий_результат: ip}
+        future_to_ip = {
+            executor.submit(check_server, ip, port, timeout): ip 
+            for ip in ip_list
+        }
+        
+        # Перебираем результаты по мере завершения
+        for future in as_completed(future_to_ip):
+            ip = future_to_ip[future]
+            try:
+                result = future.result()
+                if result:
+                    found_server = result
+                    print(f"[SCAN] Сервер найден: {result}")
+                    # Отменяем остальные задачи
+                    for f in future_to_ip:
+                        f.cancel()
+                    break
+            except:
+                pass
+    
+    return found_server
+
+# ===================================================================
 # ГЛАВНЫЙ КЛАСС
 # ===================================================================
 class RateMonitor:
@@ -40,7 +125,7 @@ class RateMonitor:
         
         self.root = root
         self.root.title("Монитор криптовалют + анализ RTT")
-        self.root.geometry("800x720")
+        self.root.geometry("800x750")
         self.root.resizable(True, True)
         
         # Переменные для данных
@@ -62,6 +147,7 @@ class RateMonitor:
         
         # URL сервера
         self.server_url = None
+        self.is_scanning = False
         
         # Флаг для предотвращения одновременного обновления графика
         self.plot_updating = False
@@ -94,10 +180,17 @@ class RateMonitor:
         self.port_entry.insert(0, str(DEFAULT_SERVER_PORT))
         self.port_entry.pack(side=tk.LEFT, padx=(5, 10))
         
+        # Кнопка "Подключиться"
         self.btn_connect = tk.Button(connection_frame, text="Подключиться", 
                                      command=self.on_connect_click,
                                      font=('Arial', 10), bg='#4CAF50', fg='white', padx=15)
         self.btn_connect.pack(side=tk.LEFT)
+        
+        # Кнопка "Найти сервер"
+        self.btn_find = tk.Button(connection_frame, text="Найти сервер", 
+                                  command=self.find_server,
+                                  font=('Arial', 10), bg='#FF9800', fg='white', padx=15)
+        self.btn_find.pack(side=tk.LEFT, padx=(5, 0))
         
         # Статус подключения
         self.status_dot = tk.Label(connection_frame, text="●", font=('Arial', 16), 
@@ -228,6 +321,56 @@ class RateMonitor:
                      horizontalalignment='center', verticalalignment='center',
                      transform=self.ax2.transAxes, fontsize=14, color='gray')
         self.canvas.draw()
+    
+    # ===================================================================
+    # ПОИСК СЕРВЕРА (НОВЫЙ МЕТОД)
+    # ===================================================================
+    def find_server(self):
+        """Поиск сервера в локальной сети"""
+        if self.is_scanning:
+            return
+        
+        # Отключаем кнопку
+        self.btn_find.config(state=tk.DISABLED, text="Поиск...")
+        self.status_dot.config(fg='orange', bg='#f0f0f0')
+        self.status_label.config(text="Поиск сервера...", fg='orange')
+        
+        # Запускаем в отдельном потоке
+        threading.Thread(target=self._find_server_thread, daemon=True).start()
+    
+    def _find_server_thread(self):
+        """Поток для поиска сервера"""
+        port = int(self.port_entry.get().strip())
+        
+        # Сканируем сеть
+        found_ip = find_server_async(port=port, timeout=1, max_workers=50)
+        
+        if found_ip:
+            self.root.after(0, self._find_server_success, found_ip)
+        else:
+            self.root.after(0, self._find_server_failed)
+    
+    def _find_server_success(self, ip):
+        """Сервер найден"""
+        self.ip_entry.delete(0, tk.END)
+        self.ip_entry.insert(0, ip)
+        self.btn_find.config(state=tk.NORMAL, text="Найти сервер")
+        self.status_dot.config(fg='green', bg='#f0f0f0')
+        self.status_label.config(text=f"Сервер найден: {ip}", fg='green')
+        
+        # Автоматически подключаемся
+        port = int(self.port_entry.get().strip())
+        self.connect_to_server(ip, port)
+    
+    def _find_server_failed(self):
+        """Сервер не найден"""
+        self.btn_find.config(state=tk.NORMAL, text="Найти сервер")
+        self.status_dot.config(fg='red', bg='#f0f0f0')
+        self.status_label.config(text="Сервер не найден", fg='red')
+        
+        messagebox.showwarning("Сервер не найден", 
+                              "Не удалось найти сервер в локальной сети.\n"
+                              "Проверьте, что сервер запущен, и попробуйте ввести IP вручную.")
     
     # ===================================================================
     # ПОДКЛЮЧЕНИЕ К СЕРВЕРУ
